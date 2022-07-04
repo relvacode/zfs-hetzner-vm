@@ -18,7 +18,7 @@ set -o pipefail
 set -o nounset
 
 # Variables
-v_bpool_name=
+v_bpool_name=bpool
 v_bpool_tweaks=
 v_rpool_name=
 v_rpool_tweaks=
@@ -38,8 +38,8 @@ v_suitable_disks=()
 c_deb_packages_repo=http://mirror.hetzner.de/ubuntu/packages
 c_deb_security_repo=http://mirror.hetzner.de/ubuntu/security
 
-c_default_zfs_arc_max_mb=250
-c_default_bpool_tweaks="-o ashift=12 -O compression=lz4"
+c_default_zfs_arc_max_mb=0
+c_default_bpool_tweaks="-o ashift=12 -O compression=lz4 -O normalization=formD -O relatime=on -O xattr=sa -o feature@async_destroy=enabled -o feature@bookmarks=enabled -o feature@embedded_data=enabled -o feature@empty_bpobj=enabled -o feature@enabled_txg=enabled -o feature@extensible_dataset=enabled -o feature@filesystem_limits=enabled -o feature@hole_birth=enabled -o feature@large_blocks=enabled -o feature@lz4_compress=enabled -o feature@spacemap_histogram=enabled"
 c_default_rpool_tweaks="-o ashift=12 -O acltype=posixacl -O compression=zstd-9 -O dnodesize=auto -O atime=off -O xattr=sa -O normalization=formD -O dedup=off"
 c_default_hostname=terem
 c_zfs_mount_dir=/mnt
@@ -266,15 +266,6 @@ function ask_pool_names {
   # shellcheck disable=SC2119
   print_step_info_header
 
-  local bpool_name_invalid_message=
-
-  while [[ ! $v_bpool_name =~ ^[a-z][a-zA-Z_:.-]+$ ]]; do
-    v_bpool_name=$(dialog --inputbox "${bpool_name_invalid_message}Insert the name for the boot pool" 30 100 bpool 3>&1 1>&2 2>&3)
-
-    bpool_name_invalid_message="Invalid pool name! "
-  done
-  local rpool_name_invalid_message=
-
   while [[ ! $v_rpool_name =~ ^[a-z][a-zA-Z_:.-]+$ ]]; do
     v_rpool_name=$(dialog --inputbox "${rpool_name_invalid_message}Insert the name for the root pool" 30 100 rpool 3>&1 1>&2 2>&3)
 
@@ -364,7 +355,7 @@ function determine_kernel_variant {
 }
 
 function chroot_execute {
-  chroot $c_zfs_mount_dir bash -c "$1"
+  echo -n "$@" | chroot $c_zfs_mount_dir bash -
 }
 
 function unmount_and_export_fs {
@@ -380,7 +371,7 @@ function unmount_and_export_fs {
 
   SECONDS=0
 
-  for virtual_fs_dir in dev sys proc; do
+  for virtual_fs_dir in dev sys proc run boot/efi; do
     while mountpoint -q "$c_zfs_mount_dir/$virtual_fs_dir" && [[ $SECONDS -lt $max_unmount_wait ]]; do
       sleep 0.5
       echo -n .
@@ -389,7 +380,7 @@ function unmount_and_export_fs {
 
   echo
 
-  for virtual_fs_dir in dev sys proc; do
+  for virtual_fs_dir in dev sys proc run boot/efi; do
     if mountpoint -q "$c_zfs_mount_dir/$virtual_fs_dir"; then
       echo "Re-issuing umount for $c_zfs_mount_dir/$virtual_fs_dir"
       umount --recursive --force --lazy "$c_zfs_mount_dir/$virtual_fs_dir"
@@ -481,9 +472,11 @@ echo "======= partitioning the disk =========="
 
   for selected_disk in "${v_selected_disks[@]}"; do
     wipefs --all --force "$selected_disk"
-    sgdisk -a8 -n1:24K:+1000K            -t1:EF02 "$selected_disk"
-    sgdisk -n2:0:+2G                   -t2:BF01 "$selected_disk" # Boot pool
-    sgdisk -n3:0:"$tail_space_parameter" -t3:BF01 "$selected_disk" # Root pool
+    sgdisk     -n1:1M:+512M   -t1:EF00 "$selected_disk"
+    sgdisk -a8 -n5:24K:+1000K -t5:EF02 "$selected_disk"
+    sgdisk     "-n2:0:+${v_swap_size}G"    -t2:FD00 "$selected_disk"  # Swap pool
+    sgdisk     -n3:0:+2G                   -t3:BE00 "$selected_disk"  # Boot pool
+    sgdisk     -n4:0:"$tail_space_parameter"        -t4:BF00 "$selected_disk" # Root pool
   done
 
   udevadm settle
@@ -491,6 +484,7 @@ echo "======= partitioning the disk =========="
 echo "======= create zfs pools and datasets =========="
 
   encryption_options=()
+  spool_disks_partitions=()
   rpool_disks_partitions=()
   bpool_disks_partitions=()
 
@@ -499,8 +493,9 @@ echo "======= create zfs pools and datasets =========="
   fi
 
   for selected_disk in "${v_selected_disks[@]}"; do
-    rpool_disks_partitions+=("${selected_disk}-part3")
-    bpool_disks_partitions+=("${selected_disk}-part2")
+    rpool_disks_partitions+=("${selected_disk}-part4")
+    bpool_disks_partitions+=("${selected_disk}-part3")
+    spool_disks_partitions+=("${selected_disk}-part2")
   done
 
 # shellcheck disable=SC2086
@@ -518,46 +513,49 @@ echo -n "$v_passphrase" | zpool create \
   -O mountpoint=/ -R $c_zfs_mount_dir -f \
   $v_rpool_name mirror "${rpool_disks_partitions[@]:0:2}" mirror "${rpool_disks_partitions[@]:2:2}"
 
+
 zfs create -o canmount=off -o mountpoint=none "$v_rpool_name/ROOT"
 zfs create -o canmount=off -o mountpoint=none "$v_bpool_name/BOOT"
 
-zfs create -o canmount=noauto -o mountpoint=/ "$v_rpool_name/ROOT/ubuntu"
-zfs mount "$v_rpool_name/ROOT/ubuntu"
+UUID=$(dd if=/dev/urandom bs=1 count=100 2>/dev/null |
+    tr -dc 'a-z0-9' | cut -c-6)
 
-zfs create -o canmount=noauto -o mountpoint=/boot "$v_bpool_name/BOOT/ubuntu"
-zfs mount "$v_bpool_name/BOOT/ubuntu"
+zfs create -o mountpoint=/ \
+    -o com.ubuntu.zsys:bootfs=yes \
+    -o com.ubuntu.zsys:last-used=$(date +%s) "$v_rpool_name/ROOT/ubuntu_$UUID"
 
-zfs create                                 "$v_rpool_name/home"
-zfs create -o mountpoint=/root             "$v_rpool_name/home/root"
-zfs create -o canmount=off                 "$v_rpool_name/var"
-zfs create -o canmount=off                 "$v_rpool_name/var/lib"
-zfs create                                 "$v_rpool_name/var/log"
-zfs create                                 "$v_rpool_name/var/spool"
+zfs create -o mountpoint=/boot "$v_bpool_name/BOOT/ubuntu_$UUID"
+zfs create -o com.ubuntu.zsys:bootfs=no "$v_bpool_name/grub"
 
-zfs create -o com.sun:auto-snapshot=false  "$v_rpool_name/var/cache"
-zfs create -o com.sun:auto-snapshot=false  "$v_rpool_name/var/tmp"
-chmod 1777 "$c_zfs_mount_dir/var/tmp"
+zfs create -o com.ubuntu.zsys:bootfs=no \
+    "$v_rpool_name/ROOT/ubuntu_$UUID/srv"
+zfs create -o com.ubuntu.zsys:bootfs=no -o canmount=off \
+    "$v_rpool_name/ROOT/ubuntu_$UUID/usr"
+zfs create "$v_rpool_name/ROOT/ubuntu_$UUID/usr/local"
+zfs create -o com.ubuntu.zsys:bootfs=no -o canmount=off \
+    "$v_rpool_name/ROOT/ubuntu_$UUID/var"
+zfs create "$v_rpool_name/ROOT/ubuntu_$UUID/var/lib"
+zfs create "$v_rpool_name/ROOT/ubuntu_$UUID/var/lib/AccountsService"
+zfs create "$v_rpool_name/ROOT/ubuntu_$UUID/var/lib/apt"
+zfs create "$v_rpool_name/ROOT/ubuntu_$UUID/var/lib/dpkg"
+zfs create "$v_rpool_name/ROOT/ubuntu_$UUID/var/lib/NetworkManager"
+zfs create "$v_rpool_name/ROOT/ubuntu_$UUID/var/log"
+zfs create "$v_rpool_name/ROOT/ubuntu_$UUID/var/mail"
+zfs create "$v_rpool_name/ROOT/ubuntu_$UUID/var/snap"
+zfs create "$v_rpool_name/ROOT/ubuntu_$UUID/var/spool"
 
-zfs create                                 "$v_rpool_name/srv"
+zfs create -o canmount=off -o mountpoint=/ \
+    "$v_rpool_name/USERDATA"
+zfs create -o com.ubuntu.zsys:bootfs-datasets="$v_rpool_name/ROOT/ubuntu_$UUID" \
+    -o canmount=on -o mountpoint=/root \
+    "$v_rpool_name/USERDATA/root_$UUID"
+chmod 700 "$c_zfs_mount_dir/root"
 
-zfs create -o canmount=off                 "$v_rpool_name/usr"
-zfs create                                 "$v_rpool_name/usr/local"
+# Create tmp
 
-zfs create                                 "$v_rpool_name/var/mail"
-
-zfs create -o com.sun:auto-snapshot=false -o canmount=on -o mountpoint=/tmp "$v_rpool_name/tmp"
-chmod 1777 "$c_zfs_mount_dir/tmp"
-
-if [[ $v_swap_size -gt 0 ]]; then
-  zfs create \
-    -V "${v_swap_size}G" -b "$(getconf PAGESIZE)" \
-    -o compression=zle -o logbias=throughput -o sync=always -o primarycache=metadata -o secondarycache=none -o com.sun:auto-snapshot=false \
-    "$v_rpool_name/swap"
-
-  udevadm settle
-
-  mkswap -f "/dev/zvol/$v_rpool_name/swap"
-fi
+mkdir /mnt/run
+mount -t tmpfs tmpfs /mnt/run
+mkdir /mnt/run/lock
 
 echo "======= setting up initial system packages =========="
 debootstrap --arch=amd64 focal "$c_zfs_mount_dir" "$c_deb_packages_repo"
@@ -673,7 +671,7 @@ chroot_execute "rm -f /etc/localtime /etc/timezone"
 chroot_execute "dpkg-reconfigure tzdata -f noninteractive "
 
 echo "======= installing latest kernel============="
-chroot_execute "DEBIAN_FRONTEND=noninteractive apt install --yes linux-headers${v_kernel_variant}-hwe-18.04 linux-image${v_kernel_variant}-hwe-18.04"
+chroot_execute "DEBIAN_FRONTEND=noninteractive apt install --yes linux-headers${v_kernel_variant}-hwe-20.04 linux-image${v_kernel_variant}-hwe-20.04"
 if [[ $v_kernel_variant == "-virtual" ]]; then
   # linux-image-extra is only available for virtual hosts
   chroot_execute "DEBIAN_FRONTEND=noninteractive apt install --yes linux-image-extra-virtual-hwe-20.04"
@@ -681,27 +679,20 @@ fi
 
 
 echo "======= installing aux packages =========="
-chroot_execute "apt install --yes man-db wget curl software-properties-common nano htop gnupg"
+chroot_execute "apt install --yes man-db wget curl software-properties-common vim htop gnupg"
 chroot_execute "systemctl disable thermald"
 
-echo "======= installing zfs packages =========="
-chroot_execute 'echo "zfs-dkms zfs-dkms/note-incompatible-licenses note true" | debconf-set-selections'
+echo "======= setup boot =========="
+chroot_execute "apt install --yes dosfstools"
+for selected_disk in "${v_selected_disks[@]}"; do
+  chroot_execute "mkdosfs -F 32 -s 1 -n EFI ${selected_disk}-part1"
+done
+chroot_execute "mkdir /boot/efi"
+chroot_execute "echo /dev/disk/by-uuid/$(blkid -s UUID -o value ${v_selected_disks[0]}-part1) /boot/efi vfat defaults 0 0 >> /etc/fstab"
+chroot_execute "mount /boot/efi"
 
-if [[ $v_zfs_experimental == "1" ]]; then
-  chroot_execute "wget -O - https://terem42.github.io/zfs-debian/apt_pub.gpg | apt-key add -"
-  chroot_execute "add-apt-repository 'deb https://terem42.github.io/zfs-debian/public zfs-debian-experimental main'"
-  chroot_execute "apt update"
-  chroot_execute "apt install -t zfs-debian-experimental --yes zfs-initramfs zfs-dkms zfsutils-linux"
-else
-  chroot_execute "add-apt-repository --yes ppa:jonathonf/zfs"
-  chroot_execute "apt install --yes zfs-initramfs zfs-dkms zfsutils-linux"
-fi
-chroot_execute 'cat << DKMS > /etc/dkms/zfs.conf
-# override for /usr/src/zfs-*/dkms.conf:
-# always rebuild initrd when zfs module has been changed
-# (either by a ZFS update or a new kernel version)
-REMAKE_INITRD='yes'
-DKMS'
+chroot_execute "DEBIAN_FRONTEND=noninteractive apt install --yes grub-pc zfs-initramfs zsys"
+chroot_execute "apt purge --yes os-prober"
 
 echo "======= installing OpenSSH and network tooling =========="
 chroot_execute "apt install --yes openssh-server net-tools"
@@ -723,22 +714,32 @@ cp /etc/zfs/zpool.cache /mnt/etc/zfs/zpool.cache
 echo "========setting up zfs module parameters========"
 chroot_execute "echo options zfs zfs_arc_max=$((v_zfs_arc_max_mb * 1024 * 1024)) >> /etc/modprobe.d/zfs.conf"
 
+echo "========= setup swap ======="
+chroot_execute "apt install --yes mdadm"
+chroot_execute "mdadm --create /dev/md0 --metadata=1.2 --level=raid10 --raid-devices=4" "${spool_disks_partitions[@]}"
+chroot_execute "mkswap -f /dev/md0"
+chroot_execute "echo /dev/disk/by-uuid/$(blkid -s UUID -o value /dev/md0) none swap discard 0 0 >> /etc/fstab"
+
+echo "======== setup tmpfs ======="
+chroot_execute "cp /usr/share/systemd/tmp.mount /etc/systemd/system/"
+chroot_execute "systemctl enable tmp.mount"
+
 echo "======= setting up grub =========="
-chroot_execute "echo 'grub-pc grub-pc/install_devices_empty   boolean true' | debconf-set-selections"
-chroot_execute "DEBIAN_FRONTEND=noninteractive apt install --yes grub-pc"
-chroot_execute "grub-install ${v_selected_disks[0]}"
+chroot_execute "grub-probe /boot"
 
 chroot_execute "sed -i 's/#GRUB_TERMINAL=console/GRUB_TERMINAL=console/g' /etc/default/grub"
-chroot_execute "sed -i 's|GRUB_CMDLINE_LINUX_DEFAULT=.*|GRUB_CMDLINE_LINUX_DEFAULT=\"net.ifnames=0\"|' /etc/default/grub"
-chroot_execute "sed -i 's|GRUB_CMDLINE_LINUX=\"\"|GRUB_CMDLINE_LINUX=\"root=ZFS=rpool/ROOT/ubuntu\"|g' /etc/default/grub"
+chroot_execute "sed -i 's|GRUB_CMDLINE_LINUX_DEFAULT=.*|GRUB_CMDLINE_LINUX_DEFAULT=\"net.ifnames=0 init_on_alloc=0\"|' /etc/default/grub"
+chroot_execute "sed -i 's|GRUB_CMDLINE_LINUX=\"\"|GRUB_CMDLINE_LINUX=\"root=ZFS='"$v_rpool_name/ROOT/ubuntu_$UUID"'\"|g' /etc/default/grub"
 
 chroot_execute "sed -i 's/quiet//g' /etc/default/grub"
 chroot_execute "sed -i 's/splash//g' /etc/default/grub"
 chroot_execute "echo 'GRUB_DISABLE_OS_PROBER=true'   >> /etc/default/grub"
 
-for ((i = 1; i < ${#v_selected_disks[@]}; i++)); do
-  dd if="${v_selected_disks[0]}-part1" of="${v_selected_disks[i]}-part1"
+for selected_disk in "${v_selected_disks[@]}"; do
+  chroot_execute "grub-install ${selected_disk}"
 done
+
+chroot_execute "systemctl mask grub-initrd-fallback.service"
 
 if [[ $v_encrypt_rpool == "1" ]]; then
   echo "=========set up dropbear=============="
@@ -818,28 +819,12 @@ echo "======= update grub =========="
 chroot_execute "update-grub"
 
 echo "======= setting up zed =========="
-
-chroot_execute "zfs set canmount=noauto rpool"
-
-echo "======= setting mountpoints =========="
-chroot_execute "zfs set mountpoint=legacy $v_bpool_name/BOOT/ubuntu"
-chroot_execute "echo $v_bpool_name/BOOT/ubuntu /boot zfs nodev,noatime,x-systemd.requires=zfs-mount.service,x-systemd.device-timeout=10 0 0 > /etc/fstab"
-
-chroot_execute "zfs set mountpoint=legacy $v_rpool_name/var/log"
-chroot_execute "echo $v_rpool_name/var/log /var/log zfs nodev,noatime 0 0 >> /etc/fstab"
-chroot_execute "zfs set mountpoint=legacy $v_rpool_name/var/spool"
-chroot_execute "echo $v_rpool_name/var/spool /var/spool zfs nodev,noatime 0 0 >> /etc/fstab"
-chroot_execute "zfs set mountpoint=legacy $v_rpool_name/var/tmp"
-chroot_execute "echo $v_rpool_name/var/tmp /var/tmp zfs nodev,noatime 0 0 >> /etc/fstab"
-chroot_execute "zfs set mountpoint=legacy $v_rpool_name/tmp"
-chroot_execute "echo $v_rpool_name/tmp /tmp zfs nodev,noatime 0 0 >> /etc/fstab"
-
-echo "========= add swap, if defined"
-if [[ $v_swap_size -gt 0 ]]; then
-  chroot_execute "echo /dev/zvol/$v_rpool_name/swap none swap discard 0 0 >> /etc/fstab"
-fi
-
-chroot_execute "echo RESUME=none > /etc/initramfs-tools/conf.d/resume"
+chroot_execute "mkdir /etc/zfs/zfs-list.cache"
+chroot_execute "touch /etc/zfs/zfs-list.cache/${v_bpool_name}"
+chroot_execute "touch /etc/zfs/zfs-list.cache/${v_rpool_name}"
+chroot_execute "ln -s /usr/lib/zfs-linux/zed.d/history_event-zfs-list-cacher.sh /etc/zfs/zed.d"
+chroot_execute 'zed -F & zfs set canmount=on '"${v_bpool_name}/BOOT/ubuntu_$UUID"' && zfs set canmount=on '"${v_rpool_name}/ROOT/ubuntu_$UUID"' && killall zed'
+chroot_execute 'sed -Ei "s|/mnt/?|/|" /etc/zfs/zfs-list.cache/*'
 
 echo "======= unmounting filesystems and zfs pools =========="
 unmount_and_export_fs
