@@ -527,8 +527,6 @@ zfs create -o mountpoint=/ \
 zfs create -o mountpoint=/boot "$v_bpool_name/BOOT/ubuntu_$UUID"
 zfs create -o com.ubuntu.zsys:bootfs=no "$v_bpool_name/grub"
 
-zfs create -o com.ubuntu.zsys:bootfs=no \
-    "$v_rpool_name/ROOT/ubuntu_$UUID/srv"
 zfs create -o com.ubuntu.zsys:bootfs=no -o canmount=off \
     "$v_rpool_name/ROOT/ubuntu_$UUID/usr"
 zfs create "$v_rpool_name/ROOT/ubuntu_$UUID/usr/local"
