@@ -823,16 +823,16 @@ chroot_execute "zfs set canmount=noauto rpool"
 
 echo "======= setting mountpoints =========="
 chroot_execute "zfs set mountpoint=legacy $v_bpool_name/BOOT/ubuntu"
-chroot_execute "echo $v_bpool_name/BOOT/ubuntu /boot zfs nodev,relatime,x-systemd.requires=zfs-mount.service,x-systemd.device-timeout=10 0 0 > /etc/fstab"
+chroot_execute "echo $v_bpool_name/BOOT/ubuntu /boot zfs nodev,noatime,x-systemd.requires=zfs-mount.service,x-systemd.device-timeout=10 0 0 > /etc/fstab"
 
 chroot_execute "zfs set mountpoint=legacy $v_rpool_name/var/log"
-chroot_execute "echo $v_rpool_name/var/log /var/log zfs nodev,relatime 0 0 >> /etc/fstab"
+chroot_execute "echo $v_rpool_name/var/log /var/log zfs nodev,noatime 0 0 >> /etc/fstab"
 chroot_execute "zfs set mountpoint=legacy $v_rpool_name/var/spool"
-chroot_execute "echo $v_rpool_name/var/spool /var/spool zfs nodev,relatime 0 0 >> /etc/fstab"
+chroot_execute "echo $v_rpool_name/var/spool /var/spool zfs nodev,noatime 0 0 >> /etc/fstab"
 chroot_execute "zfs set mountpoint=legacy $v_rpool_name/var/tmp"
-chroot_execute "echo $v_rpool_name/var/tmp /var/tmp zfs nodev,relatime 0 0 >> /etc/fstab"
+chroot_execute "echo $v_rpool_name/var/tmp /var/tmp zfs nodev,noatime 0 0 >> /etc/fstab"
 chroot_execute "zfs set mountpoint=legacy $v_rpool_name/tmp"
-chroot_execute "echo $v_rpool_name/tmp /tmp zfs nodev,relatime 0 0 >> /etc/fstab"
+chroot_execute "echo $v_rpool_name/tmp /tmp zfs nodev,noatime 0 0 >> /etc/fstab"
 
 echo "========= add swap, if defined"
 if [[ $v_swap_size -gt 0 ]]; then
