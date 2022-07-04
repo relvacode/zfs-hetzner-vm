@@ -40,7 +40,7 @@ c_deb_security_repo=http://mirror.hetzner.de/ubuntu/security
 
 c_default_zfs_arc_max_mb=0
 c_default_bpool_tweaks="-o ashift=12 -O compression=lz4 -O normalization=formD -O relatime=on -O xattr=sa -o feature@async_destroy=enabled -o feature@bookmarks=enabled -o feature@embedded_data=enabled -o feature@empty_bpobj=enabled -o feature@enabled_txg=enabled -o feature@extensible_dataset=enabled -o feature@filesystem_limits=enabled -o feature@hole_birth=enabled -o feature@large_blocks=enabled -o feature@lz4_compress=enabled -o feature@spacemap_histogram=enabled"
-c_default_rpool_tweaks="-o ashift=12 -O acltype=posixacl -O compression=zstd-9 -O dnodesize=auto -O atime=off -O xattr=sa -O normalization=formD -O dedup=off"
+c_default_rpool_tweaks="-o ashift=12 -O acltype=posixacl -O compression=lz4 -O dnodesize=auto -O atime=off -O xattr=sa -O normalization=formD -O dedup=off"
 c_default_hostname=terem
 c_zfs_mount_dir=/mnt
 c_log_dir=$(dirname "$(mktemp)")/zfs-hetzner-vm
