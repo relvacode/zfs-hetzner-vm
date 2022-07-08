@@ -563,7 +563,7 @@ echo "======= setting up the network =========="
 echo "$v_hostname" > $c_zfs_mount_dir/etc/hostname
 
 cat > "$c_zfs_mount_dir/etc/hosts" <<CONF
-127.0.1.1 ${v_hostname}
+127.0.0.1 ${v_hostname}
 127.0.0.1 localhost
 
 # The following lines are desirable for IPv6 capable hosts
